@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pandas
+scikit-learn
+requests
+python-dotenv
+pydantic
+redis
+rq
+psycopg2-binary
+SQLAlchemy>=2.0
+pgvector
+sqlalchemy-utils
+tenacity

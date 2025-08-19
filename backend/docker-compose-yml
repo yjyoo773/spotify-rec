@@ -1,0 +1,50 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: spotify_recs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init-db:/docker-entrypoint-initdb.d
+  backend:
+    build: .
+    container_name: spotify_recs_backend
+    volumes:
+      - ./:/app
+      - ./app/data:/app/app/data
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/spotify_recs
+      - REDIS_URL=redis://redis:6379/0
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI}
+      - CATALOG_PATH=/app/app/data/catalog.csv
+      - GENRE_PATH=/app/app/data/artist_genres.csv
+      - POP_SPLIT=10
+      - VECTOR_DIM=128
+    depends_on:
+      - postgres
+      - redis
+  worker:
+    build: .
+    command: rq worker
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/spotify_recs
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - postgres
+
+volumes:
+  pgdata:
