@@ -5,6 +5,7 @@ scikit-learn
 requests
 python-dotenv
 pydantic
+pydantic-settings
 redis
 rq
 psycopg2-binary
@@ -12,3 +13,6 @@ SQLAlchemy>=2.0
 pgvector
 sqlalchemy-utils
 tenacity
+pytest
+pytest-asyncio
+httpx

@@ -1,4 +1,6 @@
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
+
 
 class Settings(BaseSettings):
     SPOTIFY_CLIENT_ID: str | None = None
@@ -16,7 +18,8 @@ class Settings(BaseSettings):
     POP_SPLIT: int = 10
     VECTOR_DIM: int = 128
 
-    class Config:
-        env_file = ".env"
+    # ✅ new Pydantic v2 style
+    model_config = ConfigDict(env_file=".env")
+
 
 settings = Settings()
