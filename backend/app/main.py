@@ -1,148 +1,155 @@
-from fastapi import FastAPI, HTTPException
+from __future__ import annotations
+
+import os
+import pickle
+import difflib
+from typing import Dict, List, Tuple
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-from contextlib import asynccontextmanager
 
-from .settings import settings
-from .spotify_client import (
-    get_playlist,
-    get_playlist_tracks,
-    get_tracks_batch,
-    add_tracks_to_playlist,
+# ---- File-backed recommender (features.npz + meta.pkl) ----
+# This is the only new dependency within your codebase.
+# It lazy-loads vectors/meta on first request.
+from .recommender.file_backend import recommend_from_file
+
+# ---------- FastAPI app ----------
+app = FastAPI(
+    title="spotify-rec",
+    version=os.environ.get("APP_VERSION", "mvp-0.1"),
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
-from .recommender.data_prep import data_prep
-from .recommender.feature_engineering import create_feature_set
-from .recommender.playlist_vector import playlist_vector
-from .recommender.recommend import recommend_tracks
-from .recommender.on_the_fly import build_on_the_fly_features
-from .cache import get_cache, set_cache, make_playlist_snapshot_key
-from .db import SessionLocal
-from .models import TrackFeature
-from pydantic import BaseModel
-import time
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup/shutdown logic for FastAPI"""
-    try:
-        catalog_df = pd.read_csv(settings.CATALOG_PATH)
-    except Exception as e:
-        print("No catalog loaded:", e)
-        catalog_df = pd.DataFrame()
-
-    try:
-        genre_df = pd.read_csv(settings.GENRE_PATH)
-    except Exception as e:
-        print("No genre file loaded:", e)
-        genre_df = pd.DataFrame()
-
-    if not catalog_df.empty and not genre_df.empty:
-        catalog_df = data_prep(catalog_df, genre_df, settings.POP_SPLIT)
-        features_df = create_feature_set(catalog_df)
-        print("Loaded catalog, tracks:", len(catalog_df))
-    else:
-        features_df = pd.DataFrame()
-        print("Catalog/genre not loaded — on-the-fly mode only")
-
-    # Store them in app.state instead of using globals
-    app.state.catalog_df = catalog_df
-    app.state.genre_df = genre_df
-    app.state.features_df = features_df
-
-    yield
-
-    # Shutdown cleanup here if needed
-    print("App is shutting down")
-
-
-app = FastAPI(title="Spotify Playlist Recommender", lifespan=lifespan)
+# CORS (dev-friendly; tighten for prod)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=["*"],  # set to your frontend origin(s) in prod
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# ---------- Simple META loader for search ----------
+THIS_DIR = os.path.dirname(__file__)
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(THIS_DIR, "data"))
+META_PATH = os.environ.get("META_PATH", os.path.join(DATA_DIR, "meta.pkl"))
 
-class RecommendRequest(BaseModel):
-    playlist_id: str
-    access_token: str
-    top_k: int = 20
-    weight_factor: float = 1.15
-
-
-class AddTrackRequest(BaseModel):
-    access_token: str
-    track_uri: str
+_META: Dict[str, dict] | None = None
+_TITLE_INDEX: List[Tuple[str, str]] | None = None  # (lower_title, track_id)
 
 
-@app.get("/healthz")
-def healthz():
-    return {"ok": True}
+def _ensure_meta_loaded() -> None:
+    """Lazily load meta.pkl and build a lowercase title index for naive search."""
+    global _META, _TITLE_INDEX
+    if _META is not None and _TITLE_INDEX is not None:
+        return
+    with open(META_PATH, "rb") as f:
+        _META = pickle.load(f)  # {track_id: {"title": ..., "artists": [...], "year":..., "pop_bucket":...}}
+    # Build a small searchable index (title_lower -> id)
+    _TITLE_INDEX = []
+    for tid, m in _META.items():
+        title = (m.get("title") or "").strip()
+        if title:
+            _TITLE_INDEX.append((title.lower(), tid))
 
 
-@app.post("/recommend")
-def recommend(req: RecommendRequest):
-    pl_meta = get_playlist(req.access_token, req.playlist_id)
-    playlist_tracks = get_playlist_tracks(req.access_token, req.playlist_id)
-    
-    if not playlist_tracks:
-        raise HTTPException(status_code=404, detail="Playlist empty or not found")
+def _search_titles(q: str, limit: int = 10) -> List[dict]:
+    """Very light search over titles (substring + fuzzy fallback)."""
+    _ensure_meta_loaded()
+    assert _META is not None and _TITLE_INDEX is not None
 
-    pl_df = pd.DataFrame(playlist_tracks).dropna(subset=["id"])
-    pl_df["added_at"] = pd.to_datetime(pl_df["added_at"])
-    
-    # Check which tracks we already have in DB
-    have_ids = set()
-    with SessionLocal() as session:
-        if not pl_df.empty:
-            q = session.query(TrackFeature).filter(TrackFeature.id.in_(pl_df["id"].tolist()))
-            for row in q:
-                have_ids.add(row.id)
-    missing_ids = [tid for tid in pl_df["id"].tolist() if tid not in have_ids]
-    
-    # Build on-the-fly features for missing tracks
-    if missing_ids:
-        artist_map = {t['id']: t.get('artist_ids', []) for t in playlist_tracks}
-        onfly_feats = build_on_the_fly_features(req.access_token, missing_ids, artist_map)
-        if 'features_df' not in globals() or features_df.empty:
-            features_df = onfly_feats
-        else:
-            features_df = pd.concat([features_df, onfly_feats], ignore_index=True)
-    
-    if features_df.empty:
-        raise HTTPException(status_code=400, detail="No features available to compute recommendations")
+    ql = q.strip().lower()
+    if not ql:
+        return []
 
-    # Construct playlist vector
-    pl_subset = pl_df[["id", "added_at"]].rename(columns={"added_at": "date_added"})
-    pl_vec, nonplaylist_feats = playlist_vector(features_df, pl_subset, req.weight_factor)
+    # 1) Simple substring filter
+    hits = [(t, tid) for (t, tid) in _TITLE_INDEX if ql in t]
+    # 2) If too few, add fuzzy matches
+    if len(hits) < limit:
+        universe = [t for (t, _tid) in _TITLE_INDEX]
+        fuzzy = difflib.get_close_matches(ql, universe, n=limit * 3, cutoff=0.6)
+        fuzzy_set = set(fuzzy)
+        hits.extend([(t, tid) for (t, tid) in _TITLE_INDEX if t in fuzzy_set])
 
-    if pl_vec is None or nonplaylist_feats.empty:
-        raise HTTPException(status_code=400, detail="Could not construct playlist vector")
-    
-    # Use catalog_df if it exists, else use nonplaylist_feats
-    recs = recommend_tracks(catalog_df if not catalog_df.empty else nonplaylist_feats, pl_vec, nonplaylist_feats, top_k=req.top_k)
-    
-    rec_ids = recs["id"].tolist()
-    meta = get_tracks_batch(req.access_token, rec_ids) if rec_ids else []
-    meta_map = {m["id"]: m for m in meta if m and m.get("id")}
-    
-    out = []
-    for _, r in recs.iterrows():
-        m = meta_map.get(r["id"], {})
-        images = (m.get("album", {}).get("images") or []) if m else []
-        img = images[1]["url"] if len(images) > 1 else (images[0]["url"] if images else "")
-        artists = ", ".join([a["name"] for a in m.get("artists", [])]) if m else ""
-        out.append({
-            "id": r["id"],
-            "name": m.get("name") or r.get("id"),
-            "artists": artists,
-            "album_image": img,
-            "similarity": float(r["sim"])
-        })
-
+    # Dedup while preserving order, then map to payload
+    out: List[dict] = []
+    seen = set()
+    for _, tid in hits:
+        if tid in seen:
+            continue
+        seen.add(tid)
+        m = _META[tid]
+        out.append(
+            {
+                "id": tid,
+                "title": m.get("title"),
+                "artists": m.get("artists"),
+                "year": m.get("year"),
+                "pop_bucket": m.get("pop_bucket"),
+            }
+        )
+        if len(out) >= limit:
+            break
     return out
 
 
-@app.post("/playlists/{playlist_id}/add")
-def add_to_playlist(playlist_id: str, body: AddTrackRequest):
-    resp = add_tracks_to_playlist(body.access_token, playlist_id, [body.track_uri])
-    return {"ok": True, "spotify_response": resp}
+# ---------- Health ----------
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "spotify-rec", "mode": "file-backed"}
+
+
+@app.get("/file-recs/health")
+def file_recs_health():
+    # Probe that meta is readable; vectors load lazily via recommend_from_file.
+    try:
+        _ensure_meta_loaded()
+        ready = True
+    except Exception:
+        ready = False
+    return {"status": "ok", "ready": ready}
+
+
+# ---------- Search & Recommend (file-backed) ----------
+@app.get("/file-recs/search")
+def file_recs_search(q: str, limit: int = Query(10, ge=1, le=50)):
+    results = _search_titles(q, limit=limit)
+    return {"query": q, "items": results}
+
+
+@app.get("/file-recs/recommend")
+def file_recs_recommend(
+    track_id: str,
+    k: int = Query(25, ge=1, le=100),
+    bucket_bias: float = 1.0,
+):
+    items = recommend_from_file(track_id=track_id, k=k, bucket_bias=bucket_bias)
+    if not items:
+        # Either the id isn't in features/meta OR it has no neighbors in the top-K window.
+        # Offer a helpful hint by returning a few search results that *look like* the id.
+        suggestions = []
+        try:
+            suggestions = _search_titles(track_id, limit=5)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=400,
+            detail={"message": f"unknown or cold track_id: {track_id}", "suggestions": suggestions},
+        )
+    return {"query_id": track_id, "items": items}
+
+
+# ---------- Compatibility aliases (optional, handy for existing frontends) ----------
+@app.get("/search")
+def search_alias(q: str, limit: int = Query(10, ge=1, le=50)):
+    return file_recs_search(q=q, limit=limit)  # re-use implementation
+
+
+@app.get("/recommend")
+def recommend_alias(
+    track_id: str,
+    k: int = Query(25, ge=1, le=100),
+    bucket_bias: float = 1.0,
+):
+    return file_recs_recommend(track_id=track_id, k=k, bucket_bias=bucket_bias)
