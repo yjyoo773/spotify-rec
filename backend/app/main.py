@@ -82,75 +82,63 @@ def healthz():
 @app.post("/recommend")
 def recommend(req: RecommendRequest):
     pl_meta = get_playlist(req.access_token, req.playlist_id)
-    owner_id = pl_meta.get("owner", {}).get("id", "unknown")
-    snapshot = pl_meta.get("snapshot_id", str(time.time()))
-    cache_key = make_playlist_snapshot_key(owner_id, req.playlist_id, snapshot)
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-
     playlist_tracks = get_playlist_tracks(req.access_token, req.playlist_id)
+    
     if not playlist_tracks:
-        raise HTTPException(status_code=404, detail="playlist empty or not found")
+        raise HTTPException(status_code=404, detail="Playlist empty or not found")
+
     pl_df = pd.DataFrame(playlist_tracks).dropna(subset=["id"])
     pl_df["added_at"] = pd.to_datetime(pl_df["added_at"])
-
-    missing_ids = []
+    
+    # Check which tracks we already have in DB
     have_ids = set()
     with SessionLocal() as session:
         if not pl_df.empty:
-            q = session.query(TrackFeature).filter(
-                TrackFeature.id.in_(pl_df["id"].tolist())
-            )
+            q = session.query(TrackFeature).filter(TrackFeature.id.in_(pl_df["id"].tolist()))
             for row in q:
                 have_ids.add(row.id)
     missing_ids = [tid for tid in pl_df["id"].tolist() if tid not in have_ids]
-
+    
+    # Build on-the-fly features for missing tracks
     if missing_ids:
-        artist_map = {t["id"]: t.get("artist_ids", []) for t in playlist_tracks}
+        artist_map = {t['id']: t.get('artist_ids', []) for t in playlist_tracks}
         onfly_feats = build_on_the_fly_features(req.access_token, missing_ids, artist_map)
+        if 'features_df' not in globals() or features_df.empty:
+            features_df = onfly_feats
+        else:
+            features_df = pd.concat([features_df, onfly_feats], ignore_index=True)
+    
+    if features_df.empty:
+        raise HTTPException(status_code=400, detail="No features available to compute recommendations")
 
-        if not app.state.features_df.empty:
-            app.state.features_df = pd.concat(
-                [app.state.features_df, onfly_feats], ignore_index=True
-            )
-
-    if app.state.features_df.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="No features available to compute recommendations (seed catalog or use on-the-fly endpoint).",
-        )
-
+    # Construct playlist vector
     pl_subset = pl_df[["id", "added_at"]].rename(columns={"added_at": "date_added"})
-    pl_vec, nonplaylist_feats = playlist_vector(
-        app.state.features_df, pl_subset, req.weight_factor
-    )
-    if pl_vec is None:
-        raise HTTPException(
-            status_code=400, detail="Could not construct playlist vector."
-        )
+    pl_vec, nonplaylist_feats = playlist_vector(features_df, pl_subset, req.weight_factor)
 
-    recs = recommend_tracks(app.state.catalog_df, pl_vec, nonplaylist_feats, top_k=req.top_k)
+    if pl_vec is None or nonplaylist_feats.empty:
+        raise HTTPException(status_code=400, detail="Could not construct playlist vector")
+    
+    # Use catalog_df if it exists, else use nonplaylist_feats
+    recs = recommend_tracks(catalog_df if not catalog_df.empty else nonplaylist_feats, pl_vec, nonplaylist_feats, top_k=req.top_k)
+    
     rec_ids = recs["id"].tolist()
     meta = get_tracks_batch(req.access_token, rec_ids) if rec_ids else []
     meta_map = {m["id"]: m for m in meta if m and m.get("id")}
+    
     out = []
     for _, r in recs.iterrows():
         m = meta_map.get(r["id"], {})
         images = (m.get("album", {}).get("images") or []) if m else []
         img = images[1]["url"] if len(images) > 1 else (images[0]["url"] if images else "")
         artists = ", ".join([a["name"] for a in m.get("artists", [])]) if m else ""
-        out.append(
-            {
-                "id": r["id"],
-                "name": m.get("name") or r.get("id"),
-                "artists": artists,
-                "album_image": img,
-                "similarity": float(r["sim"]),
-            }
-        )
+        out.append({
+            "id": r["id"],
+            "name": m.get("name") or r.get("id"),
+            "artists": artists,
+            "album_image": img,
+            "similarity": float(r["sim"])
+        })
 
-    set_cache(cache_key, out, ttl=60 * 10)
     return out
 
 
