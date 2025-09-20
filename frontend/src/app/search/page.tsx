@@ -1,7 +1,7 @@
 "use client";
 import { useAtom } from "jotai";
 import { seedsAtom, seedIdsAtom } from "@/state/seeds";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useState } from "react";
 import SearchBox from "@/components/SearchBox";
@@ -10,20 +10,22 @@ import TrackCard from "@/components/TrackCard";
 import BackLink from "@/components/BackLink";
 import { btn, card } from "@/lib/ui";
 import Link from "next/link";
-
+import SeedChips from "@/components/SeedChips";
 
 export default function SearchPage() {
   const [q, setQ] = useState("");
   const [offset, setOffset] = useState(0);
   const [seedsMap, setSeedsMap] = useAtom(seedsAtom);
   const [seedIds] = useAtom(seedIdsAtom);
+  
+  const qc = useQueryClient();
 
-const { data = [], isFetching, error, refetch } = useQuery({
-  queryKey: ["search", q, offset],
-  queryFn: () => api.searchTracks(q, 20, offset),
-  enabled: q.trim().length > 0,        // <- only run when we have a query
-  refetchOnWindowFocus: false,
-});
+  const { data = [], isFetching, error, refetch } = useQuery({
+    queryKey: ["search", q, offset],
+    queryFn: ({ signal }) => api.searchTracks(q, 20, offset, { signal }),
+    enabled: q.trim().length > 0,
+    refetchOnWindowFocus: false,
+  });
 
 
   const toggle = (id: string) => {
@@ -49,6 +51,7 @@ const { data = [], isFetching, error, refetch } = useQuery({
           Use {seedIds.length} seeds →
         </Link>
       </header>
+        <SeedChips />
 
       <SearchBox
         loading={isFetching}
@@ -64,7 +67,17 @@ const { data = [], isFetching, error, refetch } = useQuery({
       )}
 
       {/* Top-line loader to indicate background refresh */}
-      {isFetching && q ? <Spinner label="Searching…" /> : null}
+      {isFetching ? (
+        <div className="flex items-center gap-2">
+          <Spinner label="Searching…" />
+          <button
+            className={btn.ghost}
+            onClick={() => qc.cancelQueries({ queryKey: ["search", q, offset] })}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
 
       <div className={`grid grid-cols-1 gap-3 ${card} p-3`}>
         {data.map((t) => (
