@@ -1,4 +1,3 @@
-# backend/app/scripts/fetch_kaggle.py
 import os, subprocess, sys, pathlib
 
 def main():

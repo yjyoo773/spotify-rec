@@ -1,143 +1,105 @@
-import os, json, ast, pickle, numpy as np, pandas as pd
-from pathlib import Path
-from sklearn.feature_extraction.text import HashingVectorizer
-from typing import Dict, List
+from __future__ import annotations
+import os, json, re, pickle
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
-DATA = Path(os.environ.get("DATA_DIR", "backend/app/data"))
-CAT_PATH = DATA / "catalog.parquet"
-ART_PATH = DATA / "artist_genres.parquet"
+# -------- Paths (override via env if needed) --------
+ROOT_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(ROOT_DIR, "data"))
+TRACKS_CSV = os.environ.get("TRACKS_CSV", os.path.join(DATA_DIR, "tracks.csv"))
+ARTISTS_CSV= os.environ.get("ARTISTS_CSV", os.path.join(DATA_DIR, "artists.csv"))
+FEATURES_OUT = os.environ.get("FEATURES_PATH", os.path.join(DATA_DIR, "features.npz"))
+META_OUT     = os.environ.get("META_PATH",     os.path.join(DATA_DIR, "meta.pkl"))
 
-VECTOR_DIM = int(os.environ.get("VECTOR_DIM", "128"))
-POP_SPLIT = int(os.environ.get("POP_SPLIT", "10"))
+AUDIO_COLS = [
+    "danceability","energy","speechiness","acousticness","instrumentalness",
+    "liveness","valence","tempo","loudness"
+]
 
-def _to_list_ids(x) -> List[str]:
-    """Make artist_ids a plain Python list[str] regardless of how Parquet stored it."""
-    if isinstance(x, list):
-        return [str(i) for i in x]
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return []
-    if isinstance(x, tuple):
-        return [str(i) for i in x]
-    if isinstance(x, np.ndarray):
-        return [str(i) for i in x.tolist()]
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return []
-        for parser in (json.loads, ast.literal_eval):
+def _parse_year(x):
+    try:
+        y = int(str(x).split("-")[0])
+        return y if 1900 <= y <= 2030 else None
+    except Exception:
+        return None
+
+def _coerce_artists(cell):
+    # Use tracks.csv "artists" if present; fallback to [].
+    if isinstance(cell, list):
+        return [str(a) for a in cell]
+    if isinstance(cell, str):
+        s = cell.strip()
+        if s.startswith("["):
+            # JSON-ish list
             try:
-                v = parser(s)
-                if isinstance(v, (list, tuple, np.ndarray)):
-                    return [str(i) for i in list(v)]
+                arr = json.loads(s)
+                if isinstance(arr, list):
+                    return [str(a) for a in arr]
             except Exception:
                 pass
-        s = s.strip("[]")
-        parts = [p.strip().strip("'\"") for p in s.split(",") if p.strip()]
-        return parts
-    try:
-        return [str(i) for i in list(x)]
-    except Exception:
-        return []
+        # comma/semicolon separated fallback
+        return [t.strip() for t in re.split(r",|;", s) if t.strip()]
+    return []
 
-def _safe_year(series: pd.Series) -> pd.Series:
-    """Derive 4-digit year from release_date robustly."""
-    # Try pandas datetime first
-    dt = pd.to_datetime(series, errors="coerce", utc=True)
-    year = dt.dt.year.astype("Int64")  # nullable int
-    # Fill any nulls by string slicing fallback
-    missing = year.isna()
-    if missing.any():
-        s = series.astype(str).str.extract(r"^(\d{4})", expand=False)
-        year = year.mask(missing, s)
-    # Final cleanup: string, default '0000' if still missing
-    year = year.astype(str).replace({"<NA>": "0000", "nan": "0000"})
-    return year
+def main():
+    if not os.path.exists(TRACKS_CSV):
+        raise FileNotFoundError(f"tracks.csv not found at {TRACKS_CSV}")
 
-def load_frames():
-    if not CAT_PATH.exists():
-        raise FileNotFoundError(f"Missing {CAT_PATH}. Run prepare_parquet.py first.")
-    if not ART_PATH.exists():
-        raise FileNotFoundError(f"Missing {ART_PATH}. Run prepare_parquet.py first.")
+    tr = pd.read_csv(TRACKS_CSV)
+    # Optional: artists CSV only for future enrichment; we don't require it here.
+    if os.path.exists(ARTISTS_CSV):
+        ar = pd.read_csv(ARTISTS_CSV)[["id","name"]].rename(columns={"id":"artist_id","name":"artist_name"})
+    else:
+        ar = pd.DataFrame(columns=["artist_id","artist_name"])
 
-    cat = pd.read_parquet(CAT_PATH)
-    art = pd.read_parquet(ART_PATH)
+    # ---------- Meta ----------
+    ids = tr["id"].astype(str).tolist()
+    years = tr["release_date"].apply(_parse_year).tolist()
+    pop_bucket = (tr["popularity"].fillna(0).astype(int) // 10).tolist()
+    artist_names = tr["artists"].apply(_coerce_artists).tolist()
 
-    # id -> genres, id -> name
-    aid2genres: Dict[str, List[str]] = dict(
-        zip(art["id"].astype(str), art["genres"].apply(lambda v: v if isinstance(v, list) else []))
-    )
-    aid2name: Dict[str, str] = dict(zip(art["id"].astype(str), art["name"].astype(str)))
-
-    # normalize artist_ids
-    cat["artist_ids"] = cat["artist_ids"].apply(_to_list_ids)
-
-    # derive genres per track
-    def track_genres(aids: List[str]) -> List[str]:
-        out: List[str] = []
-        for aid in _to_list_ids(aids):
-            out.extend(aid2genres.get(aid, []))
-        # dedup preserve order, cap
-        seen = set()
-        ded = []
-        for g in out:
-            if g and g not in seen:
-                seen.add(g); ded.append(g)
-            if len(ded) >= 25:
-                break
-        return ded
-
-    # derive artist names per track
-    def track_names(aids: List[str]) -> List[str]:
-        return [aid2name.get(a, a) for a in _to_list_ids(aids)]
-
-    cat["genres"] = cat["artist_ids"].apply(track_genres)
-    cat["artist_names"] = cat["artist_ids"].apply(track_names)
-
-    # ensure core fields exist
-    if "release_date" not in cat.columns:
-        # shouldn't happen if prepare_parquet.py ran, but be defensive
-        cat["release_date"] = ""
-
-    # year + pop bucket
-    cat["year"] = _safe_year(cat["release_date"])
-    cat["popularity"] = pd.to_numeric(cat.get("popularity", 0), errors="coerce").fillna(0).astype(int)
-    cat["pop_bucket"] = (cat["popularity"] // POP_SPLIT).clip(lower=0, upper=10).astype(int)
-
-    return cat
-
-def build():
-    cat = load_frames()
-
-    # tokens: genres + year + popularity bucket
-    cat["tokens"] = (
-        cat["genres"].apply(lambda xs: " ".join(xs)) +
-        " year_" + cat["year"].astype(str) +
-        " pop_" + cat["pop_bucket"].astype(str)
-    )
-
-    vec = HashingVectorizer(n_features=VECTOR_DIM, norm=None, alternate_sign=False)
-    X = vec.transform(cat["tokens"].fillna("").tolist()).astype(np.float32).toarray()
-
-    ids = cat["id"].astype(str).to_numpy()
-
-    # Build meta with names
-    meta = {
-        tid: {
-            "title": row["title"],
-            "artists": row["artist_ids"],                # keep IDs if you need them internally
-            "artist_names": row["artist_names"],         # names for API/search
-            "year": str(row["year"]),
-            "pop_bucket": int(row["pop_bucket"]),
+    meta = {}
+    for tid, title, names, yr, pb in zip(ids, tr["name"].astype(str), artist_names, years, pop_bucket):
+        meta[str(tid)] = {
+            "title": title,
+            "artist_names": names,
+            "year": yr,
+            "pop_bucket": int(pb) if pb is not None else None,
+            "genres": [],  # intentionally empty; we don't rely on genres
         }
-        for tid, row in cat.set_index("id").iterrows()
-    }
 
-    DATA.mkdir(parents=True, exist_ok=True)
-    np.savez(DATA / "features.npz", ids=ids, vectors=X)
-    with open(DATA / "meta.pkl", "wb") as f:
+    # ---------- Features (audio only) ----------
+    # Ensure all audio columns exist; create safe defaults if missing.
+    for c in AUDIO_COLS:
+        if c not in tr.columns:
+            tr[c] = 0.0
+
+    X = tr[AUDIO_COLS].astype(float).copy()
+    # Clip a few outliers to keep scale sane
+    if "loudness" in X.columns:
+        X["loudness"] = X["loudness"].clip(-60, 0)
+    if "tempo" in X.columns:
+        X["tempo"] = X["tempo"].clip(40, 220)
+
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+
+    # L2 normalize per track
+    vecs = Xs.astype("float32")
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
+    vecs = (vecs / norms).astype("float32")
+
+    # ---------- Persist ----------
+    os.makedirs(os.path.dirname(FEATURES_OUT), exist_ok=True)
+    np.savez_compressed(FEATURES_OUT, ids=np.array(ids, dtype=object), vecs=vecs)
+
+    os.makedirs(os.path.dirname(META_OUT), exist_ok=True)
+    with open(META_OUT, "wb") as f:
         pickle.dump(meta, f)
 
-    print("Built features.npz and meta.pkl (with artist_names)")
+    print(f"Wrote {FEATURES_OUT} (ids={len(ids)}, dim={vecs.shape[1]})")
+    print(f"Wrote {META_OUT}    (meta entries={len(meta)})")
 
 if __name__ == "__main__":
-    build()
+    main()
