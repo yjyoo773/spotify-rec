@@ -1,12 +1,11 @@
 export type Track = {
   id: string;
-  name: string;
-  artists: string[];
-  album?: { id?: string; name?: string; imageUrl?: string };
-  preview_url?: string | null;
-  popularity?: number;
-  release_date?: string;
+  name: string;           
+  artists: string[];       
+  year?: string;           
+  pop_bucket?: number;    
 };
+
 
 export type RecommendRequest = {
   seeds: {
