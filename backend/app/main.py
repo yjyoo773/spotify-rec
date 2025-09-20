@@ -1,19 +1,17 @@
 from __future__ import annotations
-
 import os
 import pickle
 import difflib
 import re
 import unicodedata
 from typing import Dict, List, Tuple
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # ---- File-backed recommender (features.npz + meta.pkl) ----
 # This is the only new dependency within your codebase.
 # It lazy-loads vectors/meta on first request.
-from .recommender.file_backend import recommend_from_file
+from .recommender.file_backend import recommend_from_file, recommend_from_seeds
 
 # ---------- FastAPI app ----------
 app = FastAPI(
@@ -190,20 +188,11 @@ def file_recs_recommend(
     track_id: str,
     k: int = Query(25, ge=1, le=100),
     bucket_bias: float = 1.0,
+    genre_only: str | None = None,
 ):
-    items = recommend_from_file(track_id=track_id, k=k, bucket_bias=bucket_bias)
+    items = recommend_from_file(track_id=track_id, k=k, bucket_bias=bucket_bias, require_genre=genre_only)
     if not items:
-        # Either the id isn't in features/meta OR it has no neighbors in the top-K window.
-        # Offer a helpful hint by returning a few search results that *look like* the id.
-        suggestions = []
-        try:
-            suggestions = _search_titles(track_id, limit=5)
-        except Exception:
-            pass
-        raise HTTPException(
-            status_code=400,
-            detail={"message": f"unknown or cold track_id: {track_id}", "suggestions": suggestions},
-        )
+        raise HTTPException(status_code=400, detail=f"unknown or cold track_id: {track_id}")
     return {"query_id": track_id, "items": items}
 
 
@@ -220,3 +209,16 @@ def recommend_alias(
     bucket_bias: float = 1.0,
 ):
     return file_recs_recommend(track_id=track_id, k=k, bucket_bias=bucket_bias)
+
+@app.get("/file-recs/recommend-multi")
+def file_recs_recommend_multi(
+    track_ids: str = Query(..., description="Comma-separated track IDs/URIs/URLs"),
+    k: int = Query(25, ge=1, le=100),
+    bucket_bias: float = 1.0,
+    genre_only: str | None = None,
+):
+    ids: List[str] = [s.strip() for s in track_ids.split(",") if s.strip()]
+    items = recommend_from_seeds(ids, k=k, bucket_bias=bucket_bias, require_genre=genre_only)
+    if not items:
+        raise HTTPException(status_code=400, detail="no valid seeds or no results")
+    return {"query_ids": ids, "items": items}
