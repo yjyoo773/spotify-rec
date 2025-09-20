@@ -6,6 +6,8 @@ import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import TrackCard from "@/components/TrackCard";
 import Spinner from "@/components/Spinner";
+import BackLink from "@/components/BackLink";
+import { btn, card, subtext } from "@/lib/ui";
 
 export default function RecommendPage() {
   const sp = useSearchParams();
@@ -24,25 +26,25 @@ export default function RecommendPage() {
     <main className="mx-auto max-w-5xl p-6 space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold">Recommendations</h1>
-        <p className="text-sm text-gray-600">Seeds: {seedIds.length || "none"}</p>
+        <p className={subtext}>Seeds: {seedIds.length || "none"}</p>
       </header>
-
-      <section className="rounded-2xl border bg-white p-4 shadow-sm">
+      <BackLink/>
+      <section className={`${card} p-4`}>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
           <div className="col-span-2">
-            <label className="text-sm text-gray-600">Limit</label>
+            <label className={subtext}>Limit</label>
             <input
               type="number"
               value={limit}
               onChange={(e) => setLimit(Math.max(1, +e.target.value || 1))}
-              className="w-full rounded-lg border px-2 py-1"
+              className="w-full rounded-lg border border-[var(--border)] bg-transparent px-2 py-1"
             />
           </div>
         </div>
         <div className="mt-3">
           <button
             onClick={() => refetch()}
-            className="rounded-xl bg-emerald-600 px-4 py-2 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            className={btn.primary}
             disabled={!seedIds.length || isFetching}
             aria-busy={isFetching}
           >
@@ -67,7 +69,7 @@ export default function RecommendPage() {
 
       {!seedIds.length && (
         <p className="text-sm text-gray-500">
-          Go to <a href="/search" className="underline">Search</a>, select tracks, and click “Use N seeds →”.
+          Go to <a href="/search" className={`${btn.ghost} underline`}>Search</a>, select tracks, and click “Use N seeds →”.
         </p>
       )}
     </main>

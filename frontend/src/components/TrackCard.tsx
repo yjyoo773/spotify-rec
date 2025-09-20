@@ -1,5 +1,6 @@
 "use client";
 import { Track } from "@/types/api";
+import { card, subtext, faint } from "@/lib/ui";
 
 export default function TrackCard({
   track,
@@ -12,14 +13,14 @@ export default function TrackCard({
 }) {
   return (
     <div
-      className={`flex items-center gap-3 rounded-xl border p-3 shadow-sm ${selected ? "ring-2 ring-emerald-500" : ""}`}
+      className={`flex items-center gap-3 ${card} p-3 hover:bg-[var(--hover)] ${selected ? "outline outline-2 outline-[var(--spotify-green)]" : ""}`}
       onClick={() => onToggle?.(track.id)}
       role="button"
     >
       <div className="min-w-0 flex-1">
         <div className="truncate font-medium">{track.name}</div>
-        <div className="truncate text-sm text-gray-600">{track.artists.join(", ")}</div>
-        <div className="text-xs text-gray-400">
+        <div className={`truncate ${subtext}`}>{track.artists.join(", ")}</div>
+        <div className={faint}>
           {track.year ?? ""}
         </div>
       </div>
