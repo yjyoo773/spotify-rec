@@ -139,7 +139,6 @@ def _search_titles(q: str, limit: int = 10) -> List[dict]:
 
     scored.sort(key=key)
 
-    # dedupe near-duplicates like “Blinding Lights (Remix)” vs “Blinding Lights”
     out: List[dict] = []
     seen_titles = set()
     for _, tid in scored:
