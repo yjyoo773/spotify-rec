@@ -102,7 +102,7 @@ def recommend_from_file(track_id: str, k: int = 25, bucket_bias: float = 1.0) ->
             "id": tid,
             "score": score,
             "title": m.get("title") or tid,
-            "artists": m.get("artists"),
+            "artists": m.get("artist_names") or m.get("artists"),  # prefer names
         })
     return out
 
