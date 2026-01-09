@@ -4,7 +4,8 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$HERE/../../" && pwd)"
-META_PATH="${META_PATH:-$BACKEND_DIR/app/data/meta.pkl}"
+DATA_DIR="${DATA_DIR:-/data}"
+META_PATH="${META_PATH:-$DATA_DIR/meta.pkl}"
 
 JQ="cat"
 if command -v jq >/dev/null 2>&1; then JQ="jq ."; fi

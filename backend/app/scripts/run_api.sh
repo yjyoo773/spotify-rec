@@ -26,4 +26,8 @@ PY
 
 cd "$BACKEND_DIR"
 DATA_DIR="$DATA_DIR" META_PATH="$META_PATH" FEATURES_PATH="$FEATURES_PATH" \
-python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload
+RELOAD="${RELOAD:-0}"
+EXTRA_ARGS=()
+if [ "$RELOAD" = "1" ]; then EXTRA_ARGS+=(--reload); fi
+
+python -m uvicorn app.main:app --host "$HOST" --port "$PORT" "${EXTRA_ARGS[@]}"
