@@ -1,6 +1,6 @@
 import type { Track } from "@/types/api";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+export const API_BASE = "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -27,19 +27,17 @@ function coerceTrackList(payload: any): Track[] {
 }
 
 export const api = {
-  health: () => request<{ status: string; service?: string; mode?: string }>("/file-recs/health"),
+  health: () =>
+    request<{ status: string; service?: string; mode?: string }>("/api/file-recs/health"),
 
-  // /file-recs/search?q=&limit=
   searchTracks: async (q: string, limit = 20, offset = 0, opts?: { signal?: AbortSignal }) => {
     const s = (q ?? "").trim();
     if (!s) return [];
-    // backend doesn't support offset; keep it for UI parity but ignore here
     const params = new URLSearchParams({ q: s, limit: String(limit) });
-    const raw = await request<any>(`/file-recs/search?${params.toString()}`, { signal: opts?.signal });
+    const raw = await request<any>(`/api/search?${params.toString()}`, { signal: opts?.signal });
     return coerceTrackList(raw);
   },
 
-  // single-seed (still available)
   recommendSingle: async (
     trackId: string,
     k = 25,
@@ -53,24 +51,18 @@ export const api = {
       bucket_bias: String(bucketBias),
     });
     if (genreOnly) params.set("genre_only", genreOnly);
-    const raw = await request<any>(`/file-recs/recommend?${params.toString()}`, { signal: opts?.signal });
+    const raw = await request<any>(`/api/recommend?${params.toString()}`, { signal: opts?.signal });
     return coerceTrackList(raw);
   },
 
-  // multi-seed: /file-recs/recommend-multi?track_ids=a,b,c&k=&bucket_bias=&genre_only=
-  recommendMulti: async (
-    trackIds: string[],
-    k = 25,
-    bucketBias = 1.0,
-    opts?: { signal?: AbortSignal }
-  ) => {
+  recommendMulti: async (trackIds: string[], k = 25, bucketBias = 1.0, opts?: { signal?: AbortSignal }) => {
     if (!trackIds.length) return [];
     const params = new URLSearchParams({
       track_ids: trackIds.join(","),
       k: String(k),
       bucket_bias: String(bucketBias),
     });
-    const raw = await request<any>(`/file-recs/recommend-multi?${params.toString()}`, {
+    const raw = await request<any>(`/api/recommend-multi?${params.toString()}`, {
       signal: opts?.signal,
     });
     return coerceTrackList(raw);
